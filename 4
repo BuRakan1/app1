@@ -1,1 +1,1686 @@
+    def _delete_training_program(self):
+        """حذف برنامج تدريبي مع جميع البيانات المرتبطة"""
+        selection = self.programs_tree.selection()
+        if not selection:
+            messagebox.showinfo("تنبيه", "يرجى اختيار برنامج لحذفه")
+            return
 
+        item = self.programs_tree.item(selection[0])
+        program_data = item['values']
+        program_number = program_data[0]
+
+        if messagebox.askyesno("تأكيد الحذف",
+                               f"هل تريد حذف البرنامج: {program_number}؟\n\nسيتم حذف:\n• جميع المواد\n• جميع الجداول\n• جميع التعيينات"):
+            # الحصول على id البرنامج
+            tags = item['tags']
+            program_id = None
+            for tag in tags:
+                if tag.startswith('id_'):
+                    program_id = int(tag.split('_')[1])
+                    break
+
+            if program_id:
+                try:
+                    cursor = self.db_conn.cursor()
+
+                    # حذف الجداول المرتبطة أولاً
+                    cursor.execute("DELETE FROM program_schedule WHERE program_id = ?", (program_id,))
+
+                    # حذف المواد المرتبطة
+                    cursor.execute("DELETE FROM program_subjects WHERE program_id = ?", (program_id,))
+
+                    # حذف البرنامج نفسه
+                    cursor.execute("DELETE FROM training_programs WHERE id = ?", (program_id,))
+
+                    self.db_conn.commit()
+
+                    messagebox.showinfo("نجاح", "تم حذف البرنامج وجميع البيانات المرتبطة به بنجاح")
+                    self._load_training_programs()
+
+                except Exception as e:
+                    self.db_conn.rollback()
+                    messagebox.showerror("خطأ", f"حدث خطأ: {str(e)}")
+
+    def _archive_selected_program(self):
+        """أرشفة البرنامج المحدد"""
+        selection = self.programs_tree.selection()
+        if not selection:
+            messagebox.showinfo("تنبيه", "يرجى اختيار برنامج لأرشفته")
+            return
+
+        item = self.programs_tree.item(selection[0])
+        program_data = item['values']
+        program_number = program_data[0]
+
+        # الحصول على id البرنامج
+        tags = item['tags']
+        program_id = None
+        for tag in tags:
+            if tag.startswith('id_'):
+                program_id = int(tag.split('_')[1])
+                break
+
+        if not program_id:
+            messagebox.showerror("خطأ", "لا يمكن تحديد البرنامج")
+            return
+
+        # تأكيد الأرشفة
+        if messagebox.askyesno("تأكيد الأرشفة",
+                               f"هل تريد أرشفة البرنامج: {program_number}؟\n\n"
+                               "سيتم نقل البرنامج إلى الأرشيف ولن يظهر في القائمة الرئيسية"):
+            try:
+                cursor = self.db_conn.cursor()
+
+                # إضافة عمود is_archived إذا لم يكن موجوداً
+                cursor.execute("PRAGMA table_info(training_programs)")
+                columns = [column[1] for column in cursor.fetchall()]
+
+                if 'is_archived' not in columns:
+                    cursor.execute("ALTER TABLE training_programs ADD COLUMN is_archived INTEGER DEFAULT 0")
+
+                if 'archived_date' not in columns:
+                    cursor.execute("ALTER TABLE training_programs ADD COLUMN archived_date TEXT")
+
+                # أرشفة البرنامج
+                cursor.execute("""
+                    UPDATE training_programs 
+                    SET is_archived = 1, archived_date = ?
+                    WHERE id = ?
+                """, (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), program_id))
+
+                self.db_conn.commit()
+
+                messagebox.showinfo("نجاح", "تم أرشفة البرنامج بنجاح")
+                self._load_training_programs()
+
+            except Exception as e:
+                self.db_conn.rollback()
+                messagebox.showerror("خطأ", f"حدث خطأ أثناء الأرشفة: {str(e)}")
+
+    # 4. تعديل صفحة إدارة مسميات الدورات
+    def _manage_course_names(self):
+        """إدارة مسميات الدورات والمواد العامة والتخصصية"""
+        manage_window = tk.Toplevel(self)
+        manage_window.title("إدارة مسميات الدورات والمواد")
+        manage_window.geometry("1100x800")
+        manage_window.configure(bg=self.COLORS["background"])
+        manage_window.transient(self)
+        manage_window.grab_set()
+
+        # توسيط النافذة
+        manage_window.update_idletasks()
+        x = (manage_window.winfo_screenwidth() - 1100) // 2
+        y = (manage_window.winfo_screenheight() - 800) // 2
+        manage_window.geometry(f"1100x800+{x}+{y}")
+
+        # شريط العنوان
+        header_frame = tk.Frame(manage_window, bg="#1E3A5F", height=80)
+        header_frame.pack(fill=tk.X, padx=10, pady=10)
+        header_frame.pack_propagate(False)
+
+        title_label = tk.Label(
+            header_frame,
+            text="إدارة مسميات الدورات والمواد",
+            font=("Tajawal", 24, "bold"),
+            bg="#1E3A5F",
+            fg="white"
+        )
+        title_label.pack(expand=True)
+
+        # إطار الأزرار
+        btn_frame = tk.Frame(manage_window, bg=self.COLORS["surface"], height=70)
+        btn_frame.pack(fill=tk.X, padx=15, pady=(0, 10))
+        btn_frame.pack_propagate(False)
+
+        btn_container = tk.Frame(btn_frame, bg=self.COLORS["surface"])
+        btn_container.pack(side=tk.LEFT, padx=20, pady=15)
+
+        # أزرار الإجراءات
+        buttons = [
+            ("إضافة مسمى جديد", self.COLORS["success"], lambda: self._add_course_name(manage_window)),
+            ("تعديل المسمى", self.COLORS["warning"], lambda: self._edit_course_name(manage_window)),
+            ("حذف المسمى", self.COLORS["danger"], lambda: self._delete_course_name(manage_window)),
+            ("إدارة المواد العامة", "#FF9800", lambda: self._manage_general_subjects()),
+            ("إدارة المواد التخصصية", "#9C27B0", lambda: self._manage_specialized_subjects())
+        ]
+
+        for text, color, command in buttons:
+            btn = tk.Button(
+                btn_container,
+                text=text,
+                font=("Tajawal", 13, "bold"),
+                bg=color,
+                fg="white",
+                padx=18,
+                pady=10,
+                bd=0,
+                relief=tk.FLAT,
+                cursor="hand2",
+                command=command
+            )
+            btn.pack(side=tk.LEFT, padx=5)
+
+        # خط فاصل
+        separator = tk.Frame(manage_window, bg=self.COLORS["border"], height=2)
+        separator.pack(fill=tk.X, padx=15, pady=(0, 10))
+
+        # إطار الجدول الرئيسي
+        main_table_frame = tk.Frame(manage_window, bg="#FFFFFF", bd=2, relief=tk.RIDGE)
+        main_table_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=(0, 10))
+
+        table_frame = tk.Frame(main_table_frame, bg="#FFFFFF")
+        table_frame.pack(fill=tk.BOTH, expand=True, padx=3, pady=3)
+
+        # تنسيق Treeview
+        style = ttk.Style()
+        style.configure("CourseNames.Treeview",
+                        background="#FFFFFF",
+                        foreground="#000000",
+                        rowheight=45,
+                        fieldbackground="#FFFFFF",
+                        font=("Tajawal", 14, "normal"),
+                        borderwidth=1,
+                        relief="solid")
+
+        style.configure("CourseNames.Treeview.Heading",
+                        font=("Tajawal", 16, "bold"),
+                        background="#1E3A5F",
+                        foreground="#FFFFFF",
+                        relief="raised",
+                        borderwidth=1,
+                        padding=[10, 8])
+
+        # شريط التمرير
+        scrollbar = ttk.Scrollbar(table_frame, orient="vertical")
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # جدول المسميات
+        self.course_names_tree = ttk.Treeview(
+            table_frame,
+            columns=("id", "name", "description", "created_date"),
+            show="tree headings",
+            style="CourseNames.Treeview",
+            yscrollcommand=scrollbar.set,
+            height=12
+        )
+
+        # إخفاء عمود الشجرة
+        self.course_names_tree.column("#0", width=0, stretch=tk.NO)
+
+        # تكوين الأعمدة
+        column_configs = [
+            ("id", "م", 80, tk.CENTER),
+            ("name", "اسم الدورة", 350, tk.CENTER),
+            ("description", "الوصف", 300, tk.CENTER),
+            ("created_date", "تاريخ الإضافة", 150, tk.CENTER)
+        ]
+
+        for col_id, heading, width, anchor in column_configs:
+            self.course_names_tree.column(col_id, width=width, anchor=anchor)
+            self.course_names_tree.heading(col_id, text=heading, anchor=tk.CENTER)
+
+        # تكوين ألوان الصفوف
+        self.course_names_tree.tag_configure('oddrow', background='#FFFFFF')
+        self.course_names_tree.tag_configure('evenrow', background='#F0F8FF')
+
+        self.course_names_tree.pack(fill=tk.BOTH, expand=True)
+        scrollbar.config(command=self.course_names_tree.yview)
+
+        # تحميل المسميات
+        self._load_course_names()
+
+        # إطار المعلومات السفلي
+        info_frame = tk.Frame(manage_window, bg="#1E3A5F", height=60)
+        info_frame.pack(fill=tk.X, padx=15, pady=(5, 10))
+        info_frame.pack_propagate(False)
+
+        self.course_count_label = tk.Label(
+            info_frame,
+            text="إجمالي مسميات الدورات: 0",
+            font=("Tajawal", 14, "bold"),
+            bg="#1E3A5F",
+            fg="#FFFFFF"
+        )
+        self.course_count_label.pack(expand=True)
+
+        # زر الإغلاق
+        close_btn = tk.Button(
+            manage_window,
+            text="إغلاق",
+            font=("Tajawal", 14, "bold"),
+            bg=self.COLORS["dark"],
+            fg="white",
+            padx=30,
+            pady=12,
+            bd=0,
+            relief=tk.FLAT,
+            cursor="hand2",
+            command=manage_window.destroy
+        )
+        close_btn.pack(pady=10)
+
+        # تأثيرات hover
+        close_btn.bind("<Enter>", lambda e: close_btn.config(bg="#333333"))
+        close_btn.bind("<Leave>", lambda e: close_btn.config(bg=self.COLORS["dark"]))
+
+    # 3. دالة إدارة المواد العامة
+    def _manage_general_subjects(self):
+        """إدارة المواد العامة"""
+        subjects_window = tk.Toplevel(self)
+        subjects_window.title("إدارة المواد العامة")
+        subjects_window.geometry("800x600")
+        subjects_window.configure(bg=self.COLORS["background"])
+        subjects_window.transient(self)
+        subjects_window.grab_set()
+
+        # توسيط النافذة
+        subjects_window.update_idletasks()
+        x = (subjects_window.winfo_screenwidth() - 800) // 2
+        y = (subjects_window.winfo_screenheight() - 600) // 2
+        subjects_window.geometry(f"800x600+{x}+{y}")
+
+        # شريط العنوان
+        header_frame = tk.Frame(subjects_window, bg="#FF9800", height=70)
+        header_frame.pack(fill=tk.X)
+        header_frame.pack_propagate(False)
+
+        tk.Label(
+            header_frame,
+            text="إدارة المواد العامة",
+            font=("Tajawal", 20, "bold"),
+            bg="#FF9800",
+            fg="white"
+        ).pack(expand=True)
+
+        # إطار المحتوى
+        content_frame = tk.Frame(subjects_window, bg=self.COLORS["surface"], padx=20, pady=20)
+        content_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        # إطار الإضافة
+        add_frame = tk.Frame(content_frame, bg=self.COLORS["surface"])
+        add_frame.pack(fill=tk.X, pady=(0, 20))
+
+        tk.Label(
+            add_frame,
+            text="اسم المادة:",
+            font=("Tajawal", 14, "bold"),
+            bg=self.COLORS["surface"]
+        ).pack(side=tk.RIGHT, padx=(0, 10))
+
+        subject_entry = tk.Entry(
+            add_frame,
+            font=("Tajawal", 14),
+            width=30
+        )
+        subject_entry.pack(side=tk.RIGHT, padx=(0, 10))
+
+        def add_general_subject():
+            subject_name = subject_entry.get().strip()
+            if not subject_name:
+                messagebox.showwarning("تنبيه", "يرجى إدخال اسم المادة")
+                return
+
+            try:
+                cursor = self.db_conn.cursor()
+                cursor.execute("""
+                    INSERT INTO general_subjects (subject_name, created_date)
+                    VALUES (?, ?)
+                """, (subject_name, datetime.now().strftime("%Y-%m-%d")))
+                self.db_conn.commit()
+
+                subject_entry.delete(0, tk.END)
+                load_general_subjects()
+                messagebox.showinfo("نجاح", "تمت إضافة المادة بنجاح")
+            except sqlite3.IntegrityError:
+                messagebox.showerror("خطأ", "هذه المادة موجودة مسبقاً")
+            except Exception as e:
+                messagebox.showerror("خطأ", f"حدث خطأ: {str(e)}")
+
+        add_btn = tk.Button(
+            add_frame,
+            text="إضافة",
+            font=("Tajawal", 13, "bold"),
+            bg="#FF9800",
+            fg="white",
+            padx=20,
+            pady=8,
+            bd=0,
+            cursor="hand2",
+            command=add_general_subject
+        )
+        add_btn.pack(side=tk.RIGHT)
+
+        # قائمة المواد
+        list_frame = tk.Frame(content_frame, bg="white", relief=tk.GROOVE, bd=2)
+        list_frame.pack(fill=tk.BOTH, expand=True)
+
+        scrollbar = tk.Scrollbar(list_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        subjects_listbox = tk.Listbox(
+            list_frame,
+            font=("Tajawal", 13),
+            yscrollcommand=scrollbar.set,
+            selectmode=tk.SINGLE
+        )
+        subjects_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=subjects_listbox.yview)
+
+        # أزرار الحذف
+        buttons_frame = tk.Frame(content_frame, bg=self.COLORS["surface"])
+        buttons_frame.pack(fill=tk.X, pady=(10, 0))
+
+        def delete_subject():
+            selection = subjects_listbox.curselection()
+            if not selection:
+                messagebox.showwarning("تنبيه", "يرجى اختيار مادة للحذف")
+                return
+
+            subject_name = subjects_listbox.get(selection[0])
+            if messagebox.askyesno("تأكيد", f"هل تريد حذف المادة: {subject_name}؟"):
+                try:
+                    cursor = self.db_conn.cursor()
+                    cursor.execute("DELETE FROM general_subjects WHERE subject_name = ?", (subject_name,))
+                    self.db_conn.commit()
+                    load_general_subjects()
+                    messagebox.showinfo("نجاح", "تم حذف المادة بنجاح")
+                except Exception as e:
+                    messagebox.showerror("خطأ", f"حدث خطأ: {str(e)}")
+
+        delete_btn = tk.Button(
+            buttons_frame,
+            text="حذف المادة المحددة",
+            font=("Tajawal", 13, "bold"),
+            bg=self.COLORS["danger"],
+            fg="white",
+            padx=20,
+            pady=8,
+            bd=0,
+            cursor="hand2",
+            command=delete_subject
+        )
+        delete_btn.pack(side=tk.RIGHT)
+
+        # دالة تحميل المواد
+        def load_general_subjects():
+            subjects_listbox.delete(0, tk.END)
+            try:
+                cursor = self.db_conn.cursor()
+                cursor.execute("SELECT subject_name FROM general_subjects ORDER BY subject_name")
+                subjects = cursor.fetchall()
+                for subject in subjects:
+                    subjects_listbox.insert(tk.END, subject[0])
+            except Exception as e:
+                print(f"خطأ في تحميل المواد: {e}")
+
+        # زر الإغلاق
+        close_btn = tk.Button(
+            subjects_window,
+            text="إغلاق",
+            font=("Tajawal", 14, "bold"),
+            bg=self.COLORS["dark"],
+            fg="white",
+            padx=30,
+            pady=10,
+            bd=0,
+            cursor="hand2",
+            command=subjects_window.destroy
+        )
+        close_btn.pack(pady=10)
+
+        # تحميل المواد
+        load_general_subjects()
+
+    # 4. دالة إدارة المواد التخصصية
+    def _manage_specialized_subjects(self):
+        """إدارة المواد التخصصية"""
+        subjects_window = tk.Toplevel(self)
+        subjects_window.title("إدارة المواد التخصصية")
+        subjects_window.geometry("900x700")
+        subjects_window.configure(bg=self.COLORS["background"])
+        subjects_window.transient(self)
+        subjects_window.grab_set()
+
+        # توسيط النافذة
+        subjects_window.update_idletasks()
+        x = (subjects_window.winfo_screenwidth() - 900) // 2
+        y = (subjects_window.winfo_screenheight() - 700) // 2
+        subjects_window.geometry(f"900x700+{x}+{y}")
+
+        # شريط العنوان
+        header_frame = tk.Frame(subjects_window, bg="#9C27B0", height=70)
+        header_frame.pack(fill=tk.X)
+        header_frame.pack_propagate(False)
+
+        tk.Label(
+            header_frame,
+            text="إدارة المواد التخصصية",
+            font=("Tajawal", 20, "bold"),
+            bg="#9C27B0",
+            fg="white"
+        ).pack(expand=True)
+
+        # إطار المحتوى
+        content_frame = tk.Frame(subjects_window, bg=self.COLORS["surface"])
+        content_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        # إطار اختيار الدورة
+        course_frame = tk.Frame(content_frame, bg=self.COLORS["surface"])
+        course_frame.pack(fill=tk.X, pady=(0, 20))
+
+        tk.Label(
+            course_frame,
+            text="اختر الدورة:",
+            font=("Tajawal", 14, "bold"),
+            bg=self.COLORS["surface"]
+        ).pack(side=tk.RIGHT, padx=(0, 10))
+
+        # الحصول على مسميات الدورات
+        cursor = self.db_conn.cursor()
+        cursor.execute("SELECT name FROM course_names WHERE is_active = 1 ORDER BY name")
+        courses = [c[0] for c in cursor.fetchall()]
+
+        course_var = tk.StringVar()
+        course_combo = ttk.Combobox(
+            course_frame,
+            textvariable=course_var,
+            values=courses,
+            font=("Tajawal", 13),
+            width=40,
+            state="readonly"
+        )
+        course_combo.pack(side=tk.RIGHT)
+
+        # إطار إضافة المادة
+        add_frame = tk.Frame(content_frame, bg=self.COLORS["surface"])
+        add_frame.pack(fill=tk.X, pady=(0, 20))
+
+        tk.Label(
+            add_frame,
+            text="اسم المادة التخصصية:",
+            font=("Tajawal", 14, "bold"),
+            bg=self.COLORS["surface"]
+        ).pack(side=tk.RIGHT, padx=(0, 10))
+
+        subject_entry = tk.Entry(
+            add_frame,
+            font=("Tajawal", 14),
+            width=30
+        )
+        subject_entry.pack(side=tk.RIGHT, padx=(0, 10))
+
+        def add_specialized_subject():
+            course_name = course_var.get()
+            subject_name = subject_entry.get().strip()
+
+            if not course_name:
+                messagebox.showwarning("تنبيه", "يرجى اختيار دورة")
+                return
+
+            if not subject_name:
+                messagebox.showwarning("تنبيه", "يرجى إدخال اسم المادة")
+                return
+
+            try:
+                cursor = self.db_conn.cursor()
+                cursor.execute("""
+                    INSERT INTO specialized_subjects (course_name, subject_name, created_date)
+                    VALUES (?, ?, ?)
+                """, (course_name, subject_name, datetime.now().strftime("%Y-%m-%d")))
+                self.db_conn.commit()
+
+                subject_entry.delete(0, tk.END)
+                load_specialized_subjects()
+                messagebox.showinfo("نجاح", "تمت إضافة المادة التخصصية بنجاح")
+            except sqlite3.IntegrityError:
+                messagebox.showerror("خطأ", "هذه المادة موجودة مسبقاً لهذه الدورة")
+            except Exception as e:
+                messagebox.showerror("خطأ", f"حدث خطأ: {str(e)}")
+
+        add_btn = tk.Button(
+            add_frame,
+            text="إضافة",
+            font=("Tajawal", 13, "bold"),
+            bg="#9C27B0",
+            fg="white",
+            padx=20,
+            pady=8,
+            bd=0,
+            cursor="hand2",
+            command=add_specialized_subject
+        )
+        add_btn.pack(side=tk.RIGHT)
+
+        # قائمة المواد
+        list_frame = tk.Frame(content_frame, bg="white", relief=tk.GROOVE, bd=2)
+        list_frame.pack(fill=tk.BOTH, expand=True)
+
+        # تنسيق TreeView
+        style = ttk.Style()
+        style.configure("Specialized.Treeview",
+                        background="#FFFFFF",
+                        foreground="#000000",
+                        rowheight=35,
+                        fieldbackground="#FFFFFF",
+                        font=("Tajawal", 12))
+
+        style.configure("Specialized.Treeview.Heading",
+                        font=("Tajawal", 13, "bold"),
+                        background="#9C27B0",
+                        foreground="#FFFFFF")
+
+        scrollbar = ttk.Scrollbar(list_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        subjects_tree = ttk.Treeview(
+            list_frame,
+            columns=("course", "subject"),
+            show="tree headings",
+            style="Specialized.Treeview",
+            yscrollcommand=scrollbar.set
+        )
+
+        subjects_tree.column("#0", width=0, stretch=tk.NO)
+        subjects_tree.column("course", width=350, anchor=tk.CENTER)
+        subjects_tree.column("subject", width=350, anchor=tk.CENTER)
+
+        subjects_tree.heading("course", text="اسم الدورة")
+        subjects_tree.heading("subject", text="المادة التخصصية")
+
+        subjects_tree.pack(fill=tk.BOTH, expand=True)
+        scrollbar.config(command=subjects_tree.yview)
+
+        # أزرار الحذف
+        buttons_frame = tk.Frame(content_frame, bg=self.COLORS["surface"])
+        buttons_frame.pack(fill=tk.X, pady=(10, 0))
+
+        def delete_subject():
+            selection = subjects_tree.selection()
+            if not selection:
+                messagebox.showwarning("تنبيه", "يرجى اختيار مادة للحذف")
+                return
+
+            item = subjects_tree.item(selection[0])
+            course_name, subject_name = item['values']
+
+            if messagebox.askyesno("تأكيد", f"هل تريد حذف المادة: {subject_name} من دورة {course_name}؟"):
+                try:
+                    cursor = self.db_conn.cursor()
+                    cursor.execute("""
+                        DELETE FROM specialized_subjects 
+                        WHERE course_name = ? AND subject_name = ?
+                    """, (course_name, subject_name))
+                    self.db_conn.commit()
+                    load_specialized_subjects()
+                    messagebox.showinfo("نجاح", "تم حذف المادة بنجاح")
+                except Exception as e:
+                    messagebox.showerror("خطأ", f"حدث خطأ: {str(e)}")
+
+        delete_btn = tk.Button(
+            buttons_frame,
+            text="حذف المادة المحددة",
+            font=("Tajawal", 13, "bold"),
+            bg=self.COLORS["danger"],
+            fg="white",
+            padx=20,
+            pady=8,
+            bd=0,
+            cursor="hand2",
+            command=delete_subject
+        )
+        delete_btn.pack(side=tk.RIGHT)
+
+        # دالة تحميل المواد
+        def load_specialized_subjects():
+            for item in subjects_tree.get_children():
+                subjects_tree.delete(item)
+
+            try:
+                cursor = self.db_conn.cursor()
+                if course_var.get():
+                    cursor.execute("""
+                        SELECT course_name, subject_name 
+                        FROM specialized_subjects 
+                        WHERE course_name = ?
+                        ORDER BY subject_name
+                    """, (course_var.get(),))
+                else:
+                    cursor.execute("""
+                        SELECT course_name, subject_name 
+                        FROM specialized_subjects 
+                        ORDER BY course_name, subject_name
+                    """)
+
+                subjects = cursor.fetchall()
+                for subject in subjects:
+                    subjects_tree.insert("", tk.END, values=subject)
+            except Exception as e:
+                print(f"خطأ في تحميل المواد: {e}")
+
+        # ربط تغيير الدورة بتحديث القائمة
+        course_combo.bind("<<ComboboxSelected>>", lambda e: load_specialized_subjects())
+
+        # زر الإغلاق
+        close_btn = tk.Button(
+            subjects_window,
+            text="إغلاق",
+            font=("Tajawal", 14, "bold"),
+            bg=self.COLORS["dark"],
+            fg="white",
+            padx=30,
+            pady=10,
+            bd=0,
+            cursor="hand2",
+            command=subjects_window.destroy
+        )
+        close_btn.pack(pady=10)
+
+        # تحميل المواد
+        load_specialized_subjects()
+
+    def _load_course_names(self):
+        """تحميل مسميات الدورات"""
+        # مسح البيانات الحالية
+        for item in self.course_names_tree.get_children():
+            self.course_names_tree.delete(item)
+
+        try:
+            cursor = self.db_conn.cursor()
+            cursor.execute("""
+                SELECT id, name, description, created_date 
+                FROM course_names 
+                WHERE is_active = 1 
+                ORDER BY name
+            """)
+
+            courses = cursor.fetchall()
+
+            for index, course in enumerate(courses):
+                tag = 'evenrow' if index % 2 == 0 else 'oddrow'
+                self.course_names_tree.insert("", tk.END, values=course, tags=(tag,))
+
+        except Exception as e:
+            print(f"خطأ في تحميل مسميات الدورات: {e}")
+
+    def _add_course_name(self, parent_window):
+        """إضافة مسمى دورة جديد"""
+        add_window = tk.Toplevel(parent_window)
+        add_window.title("إضافة مسمى دورة جديد")
+        add_window.geometry("500x300")
+        add_window.configure(bg=self.COLORS["background"])
+        add_window.transient(parent_window)
+        add_window.grab_set()
+
+        # توسيط النافذة
+        add_window.update_idletasks()
+        x = (add_window.winfo_screenwidth() - 500) // 2
+        y = (add_window.winfo_screenheight() - 300) // 2
+        add_window.geometry(f"500x300+{x}+{y}")
+
+        # إطار الحقول
+        form_frame = tk.Frame(add_window, bg=self.COLORS["surface"], padx=30, pady=30)
+        form_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        # حقل اسم الدورة
+        tk.Label(form_frame, text="اسم الدورة *", font=self.FONTS["text_bold"],
+                 bg=self.COLORS["surface"]).grid(row=0, column=0, sticky=tk.W, pady=10)
+        name_entry = tk.Entry(form_frame, font=self.FONTS["text"], width=40)
+        name_entry.grid(row=0, column=1, pady=10, padx=10)
+
+        # حقل الوصف
+        tk.Label(form_frame, text="الوصف (اختياري)", font=self.FONTS["text_bold"],
+                 bg=self.COLORS["surface"]).grid(row=1, column=0, sticky=tk.W, pady=10)
+        desc_entry = tk.Entry(form_frame, font=self.FONTS["text"], width=40)
+        desc_entry.grid(row=1, column=1, pady=10, padx=10)
+
+        # إطار الأزرار
+        buttons_frame = tk.Frame(add_window, bg=self.COLORS["background"])
+        buttons_frame.pack(fill=tk.X, pady=20)
+
+        def save_course_name():
+            name = name_entry.get().strip()
+            description = desc_entry.get().strip()
+
+            if not name:
+                messagebox.showwarning("تنبيه", "يرجى إدخال اسم الدورة")
+                return
+
+            try:
+                cursor = self.db_conn.cursor()
+                cursor.execute("""
+                    INSERT INTO course_names (name, description, created_date)
+                    VALUES (?, ?, ?)
+                """, (name, description, datetime.now().strftime("%Y-%m-%d")))
+
+                self.db_conn.commit()
+                messagebox.showinfo("نجاح", "تم إضافة مسمى الدورة بنجاح")
+                add_window.destroy()
+                self._load_course_names()
+
+            except sqlite3.IntegrityError:
+                messagebox.showerror("خطأ", "اسم الدورة موجود مسبقاً")
+            except Exception as e:
+                messagebox.showerror("خطأ", f"حدث خطأ: {str(e)}")
+
+        # زر الحفظ
+        save_btn = tk.Button(
+            buttons_frame,
+            text="حفظ",
+            font=self.FONTS["text_bold"],
+            bg=self.COLORS["success"],
+            fg="white",
+            padx=30,
+            pady=10,
+            bd=0,
+            relief=tk.FLAT,
+            cursor="hand2",
+            command=save_course_name
+        )
+        save_btn.pack(side=tk.LEFT, padx=20)
+
+        # زر الإلغاء
+        cancel_btn = tk.Button(
+            buttons_frame,
+            text="إلغاء",
+            font=self.FONTS["text_bold"],
+            bg=self.COLORS["danger"],
+            fg="white",
+            padx=30,
+            pady=10,
+            bd=0,
+            relief=tk.FLAT,
+            cursor="hand2",
+            command=add_window.destroy
+        )
+        cancel_btn.pack(side=tk.RIGHT, padx=20)
+
+    def _edit_course_name(self, parent_window):
+        """تعديل مسمى دورة"""
+        selection = self.course_names_tree.selection()
+        if not selection:
+            messagebox.showinfo("تنبيه", "يرجى اختيار مسمى لتعديله")
+            return
+
+        # TODO: إضافة نافذة التعديل
+        messagebox.showinfo("قيد التطوير", "ميزة التعديل قيد التطوير")
+
+    def _delete_course_name(self, parent_window):
+        """حذف مسمى دورة"""
+        selection = self.course_names_tree.selection()
+        if not selection:
+            messagebox.showinfo("تنبيه", "يرجى اختيار مسمى لحذفه")
+            return
+
+        item = self.course_names_tree.item(selection[0])
+        values = item['values']
+        course_id = values[0]
+        course_name = values[1]
+
+        if messagebox.askyesno("تأكيد الحذف", f"هل تريد حذف المسمى: {course_name}؟"):
+            try:
+                cursor = self.db_conn.cursor()
+                cursor.execute("UPDATE course_names SET is_active = 0 WHERE id = ?", (course_id,))
+                self.db_conn.commit()
+
+                messagebox.showinfo("نجاح", "تم حذف المسمى بنجاح")
+                self._load_course_names()
+
+            except Exception as e:
+                messagebox.showerror("خطأ", f"حدث خطأ: {str(e)}")
+
+    def _load_courses(self):
+        """تحميل بيانات الدورات"""
+        # مسح البيانات الحالية
+        for item in self.courses_tree.get_children():
+            self.courses_tree.delete(item)
+
+        try:
+            cursor = self.db_conn.cursor()
+            cursor.execute("""
+                SELECT number, name, start_date, end_date, category 
+                FROM courses 
+                ORDER BY start_date DESC
+            """)
+
+            courses = cursor.fetchall()
+
+            for index, course in enumerate(courses):
+                tag = 'evenrow' if index % 2 == 0 else 'oddrow'
+                self.courses_tree.insert("", tk.END, values=course, tags=(tag,))
+
+            # تحديث العداد
+            if hasattr(self, 'course_count_label'):
+                self.course_count_label.config(text=f"إجمالي عدد الدورات: {len(courses)}")
+
+        except Exception as e:
+            print(f"خطأ في تحميل الدورات: {e}")
+
+    def _add_new_course(self):
+        """إضافة دورة جديدة"""
+        messagebox.showinfo("قيد التطوير", "ميزة إضافة الدورات قيد التطوير")
+
+    def _edit_course(self):
+        """تعديل دورة"""
+        messagebox.showinfo("قيد التطوير", "ميزة تعديل الدورات قيد التطوير")
+
+    def _delete_course(self):
+        """حذف دورة"""
+        messagebox.showinfo("قيد التطوير", "ميزة حذف الدورات قيد التطوير")
+
+    def _create_users_tab(self):
+        """إنشاء تبويب إدارة المستخدمين"""
+        users_frame = tk.Frame(self.tab_control, bg=self.COLORS["background"])
+        self.tab_control.add(users_frame, text="إدارة المستخدمين")
+
+        # إطار العنوان
+        title_frame = tk.Frame(users_frame, bg=self.COLORS["surface"], padx=20, pady=15)
+        title_frame.pack(fill=tk.X, pady=(0, 20))
+
+        tk.Label(title_frame, text="إدارة المستخدمين",
+                 font=self.FONTS["large_title"],
+                 bg=self.COLORS["surface"],
+                 fg=self.COLORS["dark"]).pack()
+
+        # إطار الأزرار
+        buttons_frame = tk.Frame(users_frame, bg=self.COLORS["background"])
+        buttons_frame.pack(pady=20)
+
+        open_users_btn = tk.Button(
+            buttons_frame,
+            text="فتح نافذة إدارة المستخدمين",
+            font=self.FONTS["text_bold"],
+            bg=self.COLORS["primary"],
+            fg="white",
+            padx=30, pady=15,
+            bd=0, relief=tk.FLAT,
+            cursor="hand2",
+            command=self._open_user_management
+        )
+        open_users_btn.pack()
+
+        # إطار المعلومات
+        info_frame = tk.Frame(users_frame, bg=self.COLORS["surface"], padx=20, pady=20)
+        info_frame.pack(fill=tk.X, padx=50, pady=20)
+
+        info_text = """من هنا يمكنك:
+        • إضافة مستخدمين جدد للنظام
+        • تعديل بيانات المستخدمين الحاليين
+        • تفعيل أو تعطيل حسابات المستخدمين
+        • إدارة صلاحيات المستخدمين
+        • حذف المستخدمين غير النشطين"""
+
+        tk.Label(info_frame, text=info_text,
+                 font=self.FONTS["text"],
+                 bg=self.COLORS["surface"],
+                 fg=self.COLORS["dark"],
+                 justify=tk.RIGHT).pack(pady=10)
+
+    def _create_settings_tab(self):
+        """إنشاء تبويب الإعدادات بتصميم محسن"""
+        settings_frame = tk.Frame(self.tab_control, bg=self.COLORS["background"])
+        self.tab_control.add(settings_frame, text="الإعدادات")
+
+        # شريط العنوان
+        header_frame = tk.Frame(settings_frame, bg="#1E3A5F", height=80)
+        header_frame.pack(fill=tk.X, padx=10, pady=10)
+        header_frame.pack_propagate(False)
+
+        title_label = tk.Label(
+            header_frame,
+            text="إعدادات النظام",
+            font=self.FONTS["large_title"],
+            bg="#1E3A5F",
+            fg="white"
+        )
+        title_label.pack(expand=True)
+
+        # إطار المحتوى الرئيسي
+        main_content = tk.Frame(settings_frame, bg=self.COLORS["background"])
+        main_content.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        # قسم النسخ الاحتياطي
+        backup_section = tk.Frame(main_content, bg=self.COLORS["surface"], relief=tk.RIDGE, bd=2)
+        backup_section.pack(fill=tk.X, pady=(0, 20))
+
+        # عنوان قسم النسخ الاحتياطي
+        backup_header = tk.Frame(backup_section, bg="#2E7D32", height=50)
+        backup_header.pack(fill=tk.X)
+        backup_header.pack_propagate(False)
+
+        tk.Label(
+            backup_header,
+            text="إدارة النسخ الاحتياطية",
+            font=("Tajawal", 18, "bold"),
+            bg="#2E7D32",
+            fg="white"
+        ).pack(expand=True)
+
+        # محتوى قسم النسخ الاحتياطي
+        backup_content = tk.Frame(backup_section, bg=self.COLORS["surface"], padx=30, pady=20)
+        backup_content.pack(fill=tk.X)
+
+        tk.Label(
+            backup_content,
+            text="إنشاء واستعراض النسخ الاحتياطية للنظام",
+            font=("Tajawal", 14),
+            bg=self.COLORS["surface"],
+            fg="#666"
+        ).pack(anchor=tk.W, pady=(0, 15))
+
+        # أزرار النسخ الاحتياطي
+        backup_buttons_frame = tk.Frame(backup_content, bg=self.COLORS["surface"])
+        backup_buttons_frame.pack(fill=tk.X)
+
+        # زر إنشاء نسخة احتياطية
+        create_backup_btn = tk.Button(
+            backup_buttons_frame,
+            text="💾 إنشاء نسخة احتياطية",
+            font=("Tajawal", 14, "bold"),
+            bg="#2E7D32",
+            fg="white",
+            padx=30,
+            pady=12,
+            bd=0,
+            relief=tk.FLAT,
+            cursor="hand2",
+            command=self._create_automatic_backup
+        )
+        create_backup_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+        # تأثيرات hover
+        create_backup_btn.bind("<Enter>", lambda e: create_backup_btn.config(bg="#1B5E20"))
+        create_backup_btn.bind("<Leave>", lambda e: create_backup_btn.config(bg="#2E7D32"))
+
+        # زر استعراض النسخ الاحتياطية
+        restore_backup_btn = tk.Button(
+            backup_buttons_frame,
+            text="📂 استعراض النسخ الاحتياطية",
+            font=("Tajawal", 14, "bold"),
+            bg="#1976D2",
+            fg="white",
+            padx=30,
+            pady=12,
+            bd=0,
+            relief=tk.FLAT,
+            cursor="hand2",
+            command=self._browse_backups
+        )
+        restore_backup_btn.pack(side=tk.LEFT)
+
+        # تأثيرات hover
+        restore_backup_btn.bind("<Enter>", lambda e: restore_backup_btn.config(bg="#0D47A1"))
+        restore_backup_btn.bind("<Leave>", lambda e: restore_backup_btn.config(bg="#1976D2"))
+
+        # خط فاصل
+        separator = tk.Frame(main_content, bg=self.COLORS["border"], height=2)
+        separator.pack(fill=tk.X, pady=20)
+
+        # قسم إعادة التعيين
+        reset_section = tk.Frame(main_content, bg=self.COLORS["surface"], relief=tk.RIDGE, bd=2)
+        reset_section.pack(fill=tk.X)
+
+        # عنوان قسم إعادة التعيين
+        reset_header = tk.Frame(reset_section, bg="#D32F2F", height=50)
+        reset_header.pack(fill=tk.X)
+        reset_header.pack_propagate(False)
+
+        tk.Label(
+            reset_header,
+            text="إعادة تعيين النظام",
+            font=("Tajawal", 18, "bold"),
+            bg="#D32F2F",
+            fg="white"
+        ).pack(expand=True)
+
+        # محتوى قسم إعادة التعيين
+        reset_content = tk.Frame(reset_section, bg=self.COLORS["surface"], padx=30, pady=20)
+        reset_content.pack(fill=tk.X)
+
+        tk.Label(
+            reset_content,
+            text="⚠️ تحذير: سيتم حذف جميع البيانات نهائياً",
+            font=("Tajawal", 14, "bold"),
+            bg=self.COLORS["surface"],
+            fg="#D32F2F"
+        ).pack(anchor=tk.W, pady=(0, 15))
+
+        # زر إعادة التعيين
+        reset_btn = tk.Button(
+            reset_content,
+            text="🗑️ إعادة تعيين النظام",
+            font=("Tajawal", 14, "bold"),
+            bg="#D32F2F",
+            fg="white",
+            padx=30,
+            pady=12,
+            bd=0,
+            relief=tk.FLAT,
+            cursor="hand2",
+            command=self._reset_system
+        )
+        reset_btn.pack()
+
+        # تأثيرات hover
+        reset_btn.bind("<Enter>", lambda e: reset_btn.config(bg="#B71C1C"))
+        reset_btn.bind("<Leave>", lambda e: reset_btn.config(bg="#D32F2F"))
+
+    def _create_automatic_backup(self):
+        """إنشاء نسخة احتياطية تلقائية في مجلد Backup"""
+        import shutil
+        import os
+
+        try:
+            # إنشاء مجلد Backup إذا لم يكن موجوداً
+            backup_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Backup")
+            if not os.path.exists(backup_dir):
+                os.makedirs(backup_dir)
+
+            # اسم ملف النسخة الاحتياطية مع التاريخ والوقت
+            backup_filename = f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+            backup_path = os.path.join(backup_dir, backup_filename)
+
+            # إغلاق المعاملات المعلقة
+            self.db_conn.commit()
+
+            # نسخ قاعدة البيانات - استخدام الاسم الصحيح
+            shutil.copy2("training_system.db", backup_path)
+
+            # إنشاء ملف معلومات
+            info_filename = f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}_info.txt"
+            info_path = os.path.join(backup_dir, info_filename)
+
+            with open(info_path, 'w', encoding='utf-8') as f:
+                f.write("معلومات النسخة الاحتياطية\n")
+                f.write("=" * 40 + "\n")
+                f.write(f"التاريخ: {datetime.now().strftime('%Y-%m-%d')}\n")
+                f.write(f"الوقت: {datetime.now().strftime('%H:%M:%S')}\n")
+                f.write(f"المستخدم: {self.current_user['full_name'] if self.current_user else 'غير محدد'}\n")
+                f.write(f"حجم الملف: {os.path.getsize(backup_path) / (1024 * 1024):.2f} MB\n")
+
+            # حساب عدد النسخ الاحتياطية
+            backup_count = len([f for f in os.listdir(backup_dir) if f.endswith('.db')])
+
+            messagebox.showinfo(
+                "نجاح",
+                f"تم إنشاء النسخة الاحتياطية بنجاح\n\n"
+                f"المسار: Backup\\{backup_filename}\n"
+                f"عدد النسخ الاحتياطية: {backup_count}"
+            )
+
+            # اختياري: حذف النسخ القديمة (الاحتفاظ بآخر 10 نسخ فقط)
+            self._cleanup_old_backups(backup_dir, keep_count=10)
+
+        except Exception as e:
+            messagebox.showerror("خطأ", f"فشل إنشاء النسخة الاحتياطية:\n{str(e)}")
+
+    def _browse_backups(self):
+        """استعراض واستعادة النسخ الاحتياطية من مجلد Backup"""
+        import os
+
+        # التحقق من وجود مجلد النسخ الاحتياطي
+        backup_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Backup")
+        if not os.path.exists(backup_dir):
+            messagebox.showwarning("تنبيه", "لا يوجد مجلد للنسخ الاحتياطية")
+            return
+
+        # الحصول على قائمة النسخ الاحتياطية
+        backup_files = [f for f in os.listdir(backup_dir) if f.endswith('.db') and f.startswith('backup_')]
+
+        if not backup_files:
+            messagebox.showwarning("تنبيه", "لا توجد نسخ احتياطية")
+            return
+
+        # ترتيب النسخ حسب التاريخ (الأحدث أولاً)
+        backup_files.sort(reverse=True)
+
+        # نافذة استعراض النسخ الاحتياطية
+        browse_window = tk.Toplevel(self)
+        browse_window.title("استعراض النسخ الاحتياطية")
+        browse_window.geometry("600x500")
+        browse_window.configure(bg=self.COLORS["background"])
+        browse_window.transient(self)
+        browse_window.grab_set()
+
+        # توسيط النافذة
+        browse_window.update_idletasks()
+        x = (browse_window.winfo_screenwidth() - 600) // 2
+        y = (browse_window.winfo_screenheight() - 500) // 2
+        browse_window.geometry(f"600x500+{x}+{y}")
+
+        # شريط العنوان
+        header_frame = tk.Frame(browse_window, bg="#1976D2", height=60)
+        header_frame.pack(fill=tk.X)
+        header_frame.pack_propagate(False)
+
+        tk.Label(
+            header_frame,
+            text="النسخ الاحتياطية المتوفرة",
+            font=("Tajawal", 18, "bold"),
+            bg="#1976D2",
+            fg="white"
+        ).pack(expand=True)
+
+        # إطار القائمة
+        list_frame = tk.Frame(browse_window, bg=self.COLORS["surface"], bd=2, relief=tk.RIDGE)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        # شريط التمرير
+        scrollbar = tk.Scrollbar(list_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # قائمة النسخ
+        listbox = tk.Listbox(
+            list_frame,
+            font=("Tajawal", 12),
+            yscrollcommand=scrollbar.set,
+            selectbackground="#1976D2",
+            selectforeground="white",
+            height=12
+        )
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=listbox.yview)
+
+        # إضافة النسخ إلى القائمة
+        for backup_file in backup_files:
+            # استخراج التاريخ والوقت من اسم الملف
+            try:
+                date_time = backup_file.replace('backup_', '').replace('.db', '')
+                date_part = date_time[:8]
+                time_part = date_time[9:]
+
+                formatted_date = f"{date_part[:4]}-{date_part[4:6]}-{date_part[6:8]}"
+                formatted_time = f"{time_part[:2]}:{time_part[2:4]}:{time_part[4:6]}"
+
+                # الحصول على حجم الملف
+                file_path = os.path.join(backup_dir, backup_file)
+                file_size = os.path.getsize(file_path) / (1024 * 1024)
+
+                display_text = f"{formatted_date} - {formatted_time} ({file_size:.2f} MB)"
+            except:
+                display_text = backup_file
+
+            listbox.insert(tk.END, display_text)
+
+        # إطار الأزرار
+        buttons_frame = tk.Frame(browse_window, bg=self.COLORS["background"])
+        buttons_frame.pack(fill=tk.X, pady=10)
+
+        def restore_selected():
+            selection = listbox.curselection()
+            if not selection:
+                messagebox.showwarning("تنبيه", "يرجى اختيار نسخة احتياطية")
+                return
+
+            selected_file = backup_files[selection[0]]
+            backup_path = os.path.join(backup_dir, selected_file)
+
+            if messagebox.askyesno(
+                    "تأكيد الاستعادة",
+                    "سيتم استبدال جميع البيانات الحالية\n\n"
+                    "هل تريد المتابعة؟",
+                    icon="warning"
+            ):
+                import shutil
+                import sys
+
+                try:
+                    # إغلاق الاتصال بقاعدة البيانات
+                    self.db_conn.close()
+
+                    # نسخ احتياطي مؤقت للبيانات الحالية
+                    temp_backup = f"temp_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+                    shutil.copy2("training_system.db", temp_backup)
+
+                    # استعادة النسخة الاحتياطية
+                    shutil.copy2(backup_path, "training_system.db")
+
+                    # حذف النسخة المؤقتة
+                    try:
+                        os.remove(temp_backup)
+                    except:
+                        pass
+
+                    messagebox.showinfo(
+                        "نجاح",
+                        "تمت استعادة النسخة الاحتياطية بنجاح\n\n"
+                        "سيتم إعادة تشغيل البرنامج"
+                    )
+
+                    browse_window.destroy()
+
+                    # إعادة تشغيل البرنامج
+                    python = sys.executable
+                    os.execl(python, python, *sys.argv)
+
+                except Exception as e:
+                    messagebox.showerror("خطأ", f"فشلت الاستعادة:\n{str(e)}")
+                    # محاولة إعادة الاتصال
+                    try:
+                        self.db_conn = sqlite3.connect("training_system.db")
+                    except:
+                        pass
+
+        # زر الاستعادة
+        restore_btn = tk.Button(
+            buttons_frame,
+            text="استعادة النسخة المحددة",
+            font=("Tajawal", 14, "bold"),
+            bg=self.COLORS["success"],
+            fg="white",
+            padx=30,
+            pady=10,
+            bd=0,
+            relief=tk.FLAT,
+            cursor="hand2",
+            command=restore_selected
+        )
+        restore_btn.pack(side=tk.LEFT, padx=20)
+
+        # زر الإغلاق
+        close_btn = tk.Button(
+            buttons_frame,
+            text="إغلاق",
+            font=("Tajawal", 14, "bold"),
+            bg=self.COLORS["dark"],
+            fg="white",
+            padx=30,
+            pady=10,
+            bd=0,
+            relief=tk.FLAT,
+            cursor="hand2",
+            command=browse_window.destroy
+        )
+        close_btn.pack(side=tk.RIGHT, padx=20)
+
+    def _cleanup_old_backups(self, backup_dir, keep_count=10):
+        """حذف النسخ الاحتياطية القديمة والاحتفاظ بعدد محدد"""
+        try:
+            import os
+
+            # الحصول على قائمة ملفات النسخ الاحتياطية
+            backup_files = []
+            for file in os.listdir(backup_dir):
+                if file.endswith('.db') and file.startswith('backup_'):
+                    file_path = os.path.join(backup_dir, file)
+                    backup_files.append((file_path, os.path.getmtime(file_path)))
+
+            # ترتيب حسب تاريخ التعديل (الأحدث أولاً)
+            backup_files.sort(key=lambda x: x[1], reverse=True)
+
+            # حذف النسخ القديمة الزائدة
+            for file_path, _ in backup_files[keep_count:]:
+                try:
+                    os.remove(file_path)
+                    # حذف ملف المعلومات المرتبط إن وجد
+                    info_path = file_path.replace('.db', '_info.txt')
+                    if os.path.exists(info_path):
+                        os.remove(info_path)
+                except:
+                    pass
+
+        except Exception as e:
+            print(f"خطأ في تنظيف النسخ القديمة: {e}")
+
+    def _reset_system(self):
+        """إعادة تعيين النظام بالكامل - حذف جميع البيانات"""
+        # تحذير أول
+        if not messagebox.askyesno(
+                "تحذير",
+                "هل أنت متأكد من رغبتك في إعادة تعيين النظام؟\n\n"
+                "سيتم حذف جميع البيانات نهائياً!",
+                icon="warning"
+        ):
+            return
+
+        # تحذير ثاني
+        if not messagebox.askyesno(
+                "تحذير نهائي",
+                "هذا آخر تحذير!\n\n"
+                "سيتم حذف:\n"
+                "• جميع المدرسين\n"
+                "• جميع البرامج والجداول\n"
+                "• جميع مسميات الدورات\n"
+                "• جميع هيئة التدريس\n\n"
+                "هل أنت متأكد تماماً؟",
+                icon="warning"
+        ):
+            return
+
+        # طلب كلمة تأكيد
+        confirm_dialog = tk.Toplevel(self)
+        confirm_dialog.title("تأكيد إعادة التعيين")
+        confirm_dialog.geometry("400x200")
+        confirm_dialog.configure(bg=self.COLORS["surface"])
+        confirm_dialog.transient(self)
+        confirm_dialog.grab_set()
+
+        # توسيط النافذة
+        confirm_dialog.update_idletasks()
+        x = (confirm_dialog.winfo_screenwidth() - 400) // 2
+        y = (confirm_dialog.winfo_screenheight() - 200) // 2
+        confirm_dialog.geometry(f"400x200+{x}+{y}")
+
+        # المحتوى
+        content = tk.Frame(confirm_dialog, bg=self.COLORS["surface"], padx=20, pady=20)
+        content.pack(fill=tk.BOTH, expand=True)
+
+        tk.Label(
+            content,
+            text="اكتب 'حذف الكل' للتأكيد:",
+            font=("Tajawal", 14, "bold"),
+            bg=self.COLORS["surface"]
+        ).pack(pady=(0, 10))
+
+        confirm_entry = tk.Entry(
+            content,
+            font=("Tajawal", 14),
+            width=30
+        )
+        confirm_entry.pack(pady=10)
+        confirm_entry.focus()
+
+        result = {"confirmed": False}
+
+        def check_confirmation():
+            if confirm_entry.get() == "حذف الكل":
+                result["confirmed"] = True
+                confirm_dialog.destroy()
+            else:
+                messagebox.showerror("خطأ", "كلمة التأكيد غير صحيحة")
+                confirm_entry.delete(0, tk.END)
+
+        tk.Button(
+            content,
+            text="تأكيد",
+            font=("Tajawal", 12, "bold"),
+            bg=self.COLORS["danger"],
+            fg="white",
+            padx=20,
+            pady=8,
+            bd=0,
+            relief=tk.FLAT,
+            command=check_confirmation
+        ).pack(pady=10)
+
+        confirm_dialog.wait_window()
+
+        if not result["confirmed"]:
+            return
+
+        # تنفيذ إعادة التعيين
+        try:
+            cursor = self.db_conn.cursor()
+
+            # حذف جميع البيانات من جميع الجداول
+            tables_to_clear = [
+                "teachers",
+                "teacher_courses",
+                "training_programs",
+                "program_subjects",
+                "program_schedule",
+                "course_names",
+                "course_teacher_paths"
+            ]
+
+            for table in tables_to_clear:
+                cursor.execute(f"DELETE FROM {table}")
+
+            # إعادة تعيين عدادات AUTO_INCREMENT
+            for table in tables_to_clear:
+                cursor.execute(f"DELETE FROM sqlite_sequence WHERE name='{table}'")
+
+            self.db_conn.commit()
+
+            messagebox.showinfo(
+                "تم",
+                "تمت إعادة تعيين النظام بنجاح\n\n"
+                "جميع البيانات تم حذفها"
+            )
+
+            # تحديث جميع الواجهات
+            if hasattr(self, '_load_teachers'):
+                self._load_teachers()
+            if hasattr(self, '_load_training_programs'):
+                self._load_training_programs()
+
+        except Exception as e:
+            self.db_conn.rollback()
+            messagebox.showerror("خطأ", f"فشلت عملية إعادة التعيين:\n{str(e)}")
+
+    # 1. دالة إنشاء الجداول المحدثة
+    def _create_database_tables(self):
+        """إنشاء جداول قاعدة البيانات مع دعم الفصول والأرشفة"""
+        try:
+            cursor = self.db_conn.cursor()
+
+            # جدول المدرسين
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS teachers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    rank TEXT,
+                    id_number TEXT UNIQUE NOT NULL,
+                    phone TEXT,
+                    workplace TEXT,
+                    qualification TEXT,
+                    category TEXT,
+                    created_date TEXT
+                )
+            """)
+
+            # جدول الدورات للمدرسين
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS teacher_courses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    teacher_id INTEGER,
+                    course_name TEXT,
+                    course_date TEXT,
+                    FOREIGN KEY (teacher_id) REFERENCES teachers(id) ON DELETE CASCADE
+                )
+            """)
+
+            # جدول البرامج التدريبية
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS training_programs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    program_number TEXT UNIQUE NOT NULL,
+                    course_name_id INTEGER,
+                    start_date TEXT,
+                    end_date TEXT,
+                    category TEXT,
+                    created_date TEXT,
+                    schedule_type TEXT DEFAULT 'multiple',
+                    has_classes INTEGER DEFAULT 0,
+                    classes_count INTEGER DEFAULT 1,
+                    is_archived INTEGER DEFAULT 0,
+                    archived_date TEXT,
+                    FOREIGN KEY (course_name_id) REFERENCES course_names(id),
+                    UNIQUE(program_number)
+                )
+            """)
+
+            # جدول مواد البرامج التدريبية
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS program_subjects (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    program_id INTEGER,
+                    subject_name TEXT NOT NULL,
+                    subject_order INTEGER,
+                    subject_category TEXT DEFAULT 'general',
+                    FOREIGN KEY (program_id) REFERENCES training_programs(id) ON DELETE CASCADE
+                )
+            """)
+
+            # جدول مسميات الدورات
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS course_names (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE NOT NULL,
+                    description TEXT,
+                    created_date TEXT,
+                    is_active INTEGER DEFAULT 1
+                )
+            """)
+
+            # جدول مسارات مدرسي الدورات
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS course_teacher_paths (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    course_name TEXT NOT NULL,
+                    teacher_id INTEGER NOT NULL,
+                    is_responsible INTEGER DEFAULT 0,
+                    created_date TEXT,
+                    FOREIGN KEY (teacher_id) REFERENCES teachers(id) ON DELETE CASCADE
+                )
+            """)
+
+            # جدول مسارات هيئة التدريس
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS faculty_subject_paths (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    subject_name TEXT NOT NULL,
+                    teacher_id INTEGER NOT NULL,
+                    is_head INTEGER DEFAULT 0,
+                    created_date TEXT,
+                    FOREIGN KEY (teacher_id) REFERENCES teachers(id) ON DELETE CASCADE
+                )
+            """)
+
+            # جدول المواد العامة
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS general_subjects (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    subject_name TEXT UNIQUE NOT NULL,
+                    description TEXT,
+                    created_date TEXT
+                )
+            """)
+
+            # جدول المواد التخصصية
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS specialized_subjects (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    course_name TEXT NOT NULL,
+                    subject_name TEXT NOT NULL,
+                    description TEXT,
+                    created_date TEXT,
+                    UNIQUE(course_name, subject_name)
+                )
+            """)
+
+            # جدول الجدول الدراسي مع دعم الفصول
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS program_schedule (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    program_id INTEGER NOT NULL,
+                    week_number INTEGER NOT NULL DEFAULT 1,
+                    day_of_week INTEGER NOT NULL,
+                    period_number INTEGER NOT NULL,
+                    start_time TEXT NOT NULL,
+                    end_time TEXT NOT NULL,
+                    subject_id INTEGER,
+                    teacher_id INTEGER,
+                    subject_type TEXT DEFAULT 'نظري',
+                    is_break INTEGER DEFAULT 0,
+                    break_name TEXT,
+                    location TEXT DEFAULT 'المقر التدريبي',
+                    is_special_week INTEGER DEFAULT 0,
+                    special_week_name TEXT,
+                    teacher_name TEXT,
+                    class_number INTEGER DEFAULT 1,
+                    FOREIGN KEY (program_id) REFERENCES training_programs(id) ON DELETE CASCADE,
+                    FOREIGN KEY (subject_id) REFERENCES program_subjects(id) ON DELETE SET NULL,
+                    FOREIGN KEY (teacher_id) REFERENCES teachers(id) ON DELETE SET NULL,
+                    UNIQUE(program_id, week_number, day_of_week, period_number, class_number)
+                )
+            """)
+
+            # جدول أوقات الحصص الافتراضية
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS default_periods (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    period_number INTEGER NOT NULL,
+                    start_time TEXT NOT NULL,
+                    end_time TEXT NOT NULL,
+                    is_break INTEGER DEFAULT 0,
+                    break_name TEXT
+                )
+            """)
+
+            # التحقق من وجود أوقات افتراضية
+            cursor.execute("SELECT COUNT(*) FROM default_periods")
+            if cursor.fetchone()[0] == 0:
+                default_times = [
+                    (1, "08:00", "08:45", 0, None),
+                    (2, "09:15", "10:00", 0, None),
+                    (3, "10:05", "10:50", 0, None),
+                    (4, "10:55", "11:40", 0, None)
+                ]
+                for period in default_times:
+                    cursor.execute("""
+                        INSERT INTO default_periods (period_number, start_time, end_time, is_break, break_name)
+                        VALUES (?, ?, ?, ?, ?)
+                    """, period)
+
+            # التحقق من وجود الأعمدة الجديدة وإضافتها إذا لزم للجداول الموجودة
+            tables_to_check = [
+                ("training_programs", [
+                    ("has_classes", "INTEGER DEFAULT 0"),
+                    ("classes_count", "INTEGER DEFAULT 1"),
+                    ("schedule_type", "TEXT DEFAULT 'multiple'"),
+                    ("is_archived", "INTEGER DEFAULT 0"),
+                    ("archived_date", "TEXT")
+                ]),
+                ("program_schedule", [
+                    ("class_number", "INTEGER DEFAULT 1"),
+                    ("subject_type", "TEXT DEFAULT 'نظري'")
+                ]),
+                ("program_subjects", [
+                    ("subject_category", "TEXT DEFAULT 'general'")
+                ])
+            ]
+
+            for table_name, columns_to_add in tables_to_check:
+                # التحقق من وجود الجدول
+                cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'")
+                if cursor.fetchone():
+                    # الجدول موجود، تحقق من الأعمدة
+                    cursor.execute(f"PRAGMA table_info({table_name})")
+                    existing_columns = [column[1] for column in cursor.fetchall()]
+
+                    for column_name, column_definition in columns_to_add:
+                        if column_name not in existing_columns:
+                            try:
+                                cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
+                                print(f"تم إضافة عمود {column_name} إلى جدول {table_name}")
+                            except Exception as e:
+                                # العمود موجود بالفعل أو خطأ آخر
+                                pass
+
+            self.db_conn.commit()
+            print("تم إنشاء/تحديث جداول قاعدة البيانات بنجاح")
+
+        except Exception as e:
+            print(f"خطأ في إنشاء الجداول: {str(e)}")
+            messagebox.showerror("خطأ في قاعدة البيانات", f"حدث خطأ أثناء إنشاء الجداول:\n{str(e)}")
+
+    def _open_user_management(self):
+        """فتح نافذة إدارة المستخدمين"""
+        if not self.current_user["permissions"]["is_admin"]:
+            messagebox.showerror("خطأ", "ليس لديك صلاحية الوصول لإدارة المستخدمين")
+            return
+
+        UserManagement(self, self.db_conn, self.current_user, self.COLORS, self.FONTS)
+
+# ===== ضع هذا =====
+if __name__ == "__main__":
+    # التحقق من الترخيص قبل بدء البرنامج
+    if verify_license_activation():
+        # فقط إذا كان البرنامج مفعلاً
+        root = tk.Tk()
+        LoginSystem(root)
+        root.mainloop()
+    else:
+        # إنهاء البرنامج إذا لم يتم التفعيل
+        import sys
+        sys.exit(0)
